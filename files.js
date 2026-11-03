@@ -1,5 +1,23 @@
 import {uid,validateFile} from './core.js';
 const MAX=20*1024*1024;
+export async function readSelectedFiles(list){
+  const selected=Array.from(list);
+  for(const file of selected)if(!file.size||file.size>MAX)throw new Error('Each file must be between 1 byte and 20 MB.');
+  // Start every read during the picker event. Mobile/cloud file references can expire
+  // before Save is pressed; copying the bytes also makes later indexing independent.
+  const results=await Promise.allSettled(selected.map(async file=>{
+    try{
+      const bytes=await file.arrayBuffer();
+      if(bytes.byteLength!==file.size)throw new Error('The selected file changed while reading it.');
+      return new File([bytes],file.name,{type:file.type,lastModified:file.lastModified});
+    }catch(cause){
+      throw new Error(`Could not read “${file.name}” from your device. Choose it again. If it is in Photos, Drive or another cloud app, download a copy to Downloads and select that copy using Upload. File access is controlled by your browser and device; there is no permission switch in this app.`,{cause});
+    }
+  }));
+  // Keep the picker alive until all reads settle, including when one file fails.
+  const failed=results.find(result=>result.status==='rejected');if(failed)throw failed.reason;
+  return results.map(result=>result.value);
+}
 const hash=async buffer=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',buffer)),b=>b.toString(16).padStart(2,'0')).join('');
 function database(){return new Promise((resolve,reject)=>{const req=indexedDB.open('together-demo-files',1);req.onupgradeneeded=()=>req.result.createObjectStore('files');req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});}
 async function demoFile(key,value){const db=await database();try{return await new Promise((resolve,reject)=>{const tx=db.transaction('files',value?'readwrite':'readonly'),store=tx.objectStore('files'),req=value?store.put(value,key):store.get(key);let result;req.onsuccess=()=>result=req.result;tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error);});}finally{db.close();}}

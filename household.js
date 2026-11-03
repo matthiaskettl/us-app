@@ -1,6 +1,6 @@
 import {snapshotForDisplay,latestSnapshot,waitForJourneySnapshot} from './transit.js';
 import {uid,today,addDays,newAppointment,berlinDateTime,appointmentOnDate,validateRecord,validateFile} from './core.js';
-import {Files,extractText,jpegPDF} from './files.js';
+import {Files,extractText,jpegPDF,readSelectedFiles} from './files.js';
 import {Scanner} from './scanner.js';
 
 export function createHousehold(ctx){
@@ -11,7 +11,8 @@ export function createHousehold(ctx){
   const normalize=value=>String(value).normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase();
   const query=()=>ctx.search().trim();
   const metadataMatch=data=>query().split(/\s+/).every(q=>normalize(JSON.stringify(data)).includes(normalize(q)));
-  function cleanup(){scan=null;scanOriginal=null;staged=[];edit=null;}
+  let readingFiles=null;
+  function cleanup(){readingFiles=null;scan=null;scanOriginal=null;staged=[];edit=null;}
   function attachments(){return [...(edit?.data.files||[]).map(f=>({...f,saved:true})),...staged.map(s=>({id:s.id,name:s.file.name,size:s.file.size,type:s.file.type,saved:false}))];}
   function attachmentsHTML(){return attachments().map(f=>`<div class="attachment-row"><span class="attachment-type">${icon(f.type.startsWith('image/')?'camera':'document')}</span><div><strong>${esc(f.name)}</strong><small>${fileSizes(f.size)}${f.saved?' · uploaded':' · ready to upload'}</small></div>${f.saved&&f.type.startsWith('image/')?button('View','view-photo','text-button',`data-id="${f.id}"`):''}${f.saved?button('Download','download-file','text-button',`data-id="${f.id}"`):''}${store.canWrite?button(icon('close'),'remove-attachment','icon-button',`data-id="${f.id}" aria-label="Remove ${esc(f.name)}"`):''}</div>`).join('')||'<p class="muted">No files attached yet.</p>';}
   const editorFooter=(label,existing)=>`${existing&&store.canWrite?button('Delete this entry','remove-household-record','danger'):''}${store.canWrite?formFooter(label):button('Close','close','secondary')}`;
@@ -79,9 +80,32 @@ export function createHousehold(ctx){
     edit={kind,id:id||uid(),data};staged=[];$('#attachments').innerHTML=attachmentsHTML();ctx.setCleanup(cleanup);
   }
   function setProgress(message){const el=$('#upload-progress');if(el)el.textContent=message;}
-  async function stage(list){
+  async function selectAttachments(el){
+    const chosen=[...el.files];if(!chosen.length||!edit||readingFiles)return;
+    const target=edit,generation=store.generation,job={},form=el.closest('form');
+    const current=()=>edit===target&&generation===store.generation&&readingFiles===job;
+    const controls=[...form.querySelectorAll('input[type=file],button[type=submit]')].map(control=>[control,control.disabled]);
+    readingFiles=job;controls.forEach(([control])=>control.disabled=true);
+    $('.form-error',form)?.replaceChildren();setProgress('Reading selected files…');
+    try{
+      if(!store.canWrite)throw new Error('This connection is read-only.');
+      validateAttachments(chosen);
+      const copies=await readSelectedFiles(chosen);
+      if(!current())return;
+      if(el.id==='scan-input')await startScan(copies[0]);else await stage(copies);
+      if(current())setProgress(el.id==='scan-input'?'':`${copies.length} file${copies.length===1?'':'s'} ready. Save to upload.`);
+    }catch(error){if(current()){setProgress('');ctx.formError(error);}}
+    finally{
+      el.value='';
+      if(current()){readingFiles=null;controls.forEach(([control,disabled])=>control.disabled=disabled);}
+    }
+  }
+  function validateAttachments(list){
     if(attachments().length+list.length>20)throw new Error('Attach at most 20 files.');
     for(const file of list){if(!file.size||file.size>20*1024*1024)throw new Error('Each file must be between 1 byte and 20 MB.');if(edit.kind==='damage'&&!['image/jpeg','image/png','image/webp'].includes(file.type))throw new Error('Choose JPEG, PNG or WebP for original damage photos. Convert unsupported HEIC photos first.');}
+  }
+  async function stage(list){
+    validateAttachments(list);
     staged.push(...list.map(file=>({id:uid(),file})));
     $('#attachments').innerHTML=attachmentsHTML();
   }
@@ -92,6 +116,7 @@ export function createHousehold(ctx){
   }
   function updateCornerControls(){if(!scan)return;const i=Number($('[name=corner]').value);$('#corner-x').value=scan.points[i][0]*100;$('#corner-y').value=scan.points[i][1]*100;}
   async function saveFiles(data){
+    if(readingFiles)throw new Error('Wait for the selected files to finish reading before saving.');
     const target=edit,generation=store.generation,check=()=>{if(edit!==target||store.generation!==generation)throw new Error('The editor or connection changed. Saving stopped; originals already uploaded remain in the original repository.');};if(scan)throw new Error('Finish the scan first: crop it or use the original photo.');if(!attachments().length)throw new Error('Attach at least one file before saving.');
     const uploaded=[...target.data.files];let warnings=[];
     for(let i=0;i<staged.length;i++){
@@ -170,10 +195,13 @@ export function createHousehold(ctx){
   }
   async function submit(form,data){
     if(form.id==='appointment-form'){const target=edit;const allDay=!!data.allDay,start=allDay?data.start.slice(0,10)+'T00:00':data.start,end=allDay?addDays(data.end.slice(0,10),1)+'T00:00':data.end;const undo=store.change('appointment',target.id,{...data,start,end,allDay});closeModal();toast('Appointment saved.',undo);render();return true;}
-    if(['damage-form','document-form'].includes(form.id)){await saveFiles(data);return true;}return false;
+    if(['damage-form','document-form'].includes(form.id)){
+      const pickers=[...form.querySelectorAll('input[type=file]')];pickers.forEach(picker=>picker.disabled=true);
+      try{await saveFiles(data);return true;}finally{if(form.isConnected)pickers.forEach(picker=>picker.disabled=!store.canWrite||!!readingFiles);}
+    }return false;
   }
   document.addEventListener('change',event=>{
-    const el=event.target;if(['attachment-input','camera-input','scan-input'].includes(el.id)&&edit){const chosen=[...el.files];el.value='';if(!chosen.length)return;Promise.resolve(el.id==='scan-input'?startScan(chosen[0]):stage(chosen)).catch(ctx.formError);}
+    const el=event.target;if(['attachment-input','camera-input','scan-input'].includes(el.id)&&edit)selectAttachments(el);
     if(el.name==='corner'&&scan)updateCornerControls();
   });
   document.addEventListener('input',event=>{

@@ -1,4 +1,4 @@
-const VERSION='together-92a40df451de61a7';
+const VERSION='together-19f6406ab9e8f6eb';
 const SHELL=['./','./index.html','./style.css','./app.js','./core.js','./store.js','./crypto.js','./household.js','./files.js','./scanner.js','./github.js','./transit.js','./config.js','./manifest.webmanifest','./icons/icon.svg','./icons/icon-192.png','./icons/icon-512.png','./icons/maskable-512.png'];
 const CACHE=VERSION+':'+self.registration.scope;
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)));});
