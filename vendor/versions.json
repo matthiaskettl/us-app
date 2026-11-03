@@ -1,0 +1,12 @@
+{
+  "packages": {
+    "pdfjs-dist": "6.5.438",
+    "fflate": "0.8.3"
+  },
+  "sha256": {
+    "fflate.mjs": "b7ca4450b19559a1d50eb381adcee94b82449674be4cd17789d9beba7e6122a1",
+    "pdf.worker.mjs": "b4c8353ded0d88d2e2009574a29eb4e0c3ff7e942ecdf51ef5f71566a9667f31",
+    "pdf.mjs": "522ad2c83bc8a0010e7f0cc60d0892b77c8d2bf2c9702dc12288311d94270f42",
+    "pdf.renderer.mjs": "6b44d83e7eecb7dc671e1aa2a98e826b85dd7ffcbf1138198e626a5e0bcd447d"
+  }
+}
