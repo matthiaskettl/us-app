@@ -1,4 +1,5 @@
 import {uid,validateFile} from './core.js';
+import {createThumbnail,isPhoto,PREVIEW_THRESHOLD} from './images.js';
 const MAX=20*1024*1024;
 export async function readSelectedFiles(list){
   const selected=Array.from(list);
@@ -22,7 +23,7 @@ const hash=async buffer=>Array.from(new Uint8Array(await crypto.subtle.digest('S
 function database(){return new Promise((resolve,reject)=>{const req=indexedDB.open('together-demo-files',1);req.onupgradeneeded=()=>req.result.createObjectStore('files');req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});}
 async function demoFile(key,value){const db=await database();try{return await new Promise((resolve,reject)=>{const tx=db.transaction('files',value?'readwrite':'readonly'),store=tx.objectStore('files'),req=value?store.put(value,key):store.get(key);let result;req.onsuccess=()=>result=req.result;tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error);});}finally{db.close();}}
 export class Files {
-  constructor(store){this.store=store;this.urls=new Map();this.generation=store.generation;}
+  constructor(store){this.store=store;this.urls=new Map();this.pending=new Map();this.generation=store.generation;}
   async upload(file,id=uid()){
     if(!this.store.canWrite)throw new Error('This connection is read-only.');
     if(!file.size||file.size>MAX)throw new Error('Choose a non-empty file no larger than 20 MB.');
@@ -30,8 +31,34 @@ export class Files {
     return this.store.github.upload(file,id);
   }
   async blob(file){if(this.store.demo){const entry=await demoFile(file.id);if(!entry)throw new Error('This demo file is no longer on this device.');return entry.blob;}return this.store.github.download(file);}
-  async url(file){if(this.generation!==this.store.generation){this.clear();this.generation=this.store.generation;}if(!this.urls.has(file.id)){const generation=this.store.generation;const blob=await this.blob(file);if(generation!==this.store.generation)throw new Error('Connection changed.');this.urls.set(file.id,URL.createObjectURL(blob));}return this.urls.get(file.id);}
-  clear(){for(const url of this.urls.values())URL.revokeObjectURL(url);this.urls.clear();}
+  async cachedURL(key,read){
+    if(this.generation!==this.store.generation){this.clear();this.generation=this.store.generation;}
+    if(this.urls.has(key))return this.urls.get(key);if(this.pending.has(key))return this.pending.get(key);
+    const generation=this.store.generation;
+    const pending=(async()=>{const blob=await read();if(generation!==this.store.generation)throw new Error('Connection changed.');const url=URL.createObjectURL(blob);this.urls.set(key,url);return url;})().finally(()=>{if(this.pending.get(key)===pending)this.pending.delete(key);});
+    this.pending.set(key,pending);return pending;
+  }
+  url(file){return this.cachedURL('file:'+file.id+':'+file.sha256,()=>this.blob(file));}
+  previewURL(file){
+    if(!isPhoto(file)||file.size<=PREVIEW_THRESHOLD)return this.url(file);
+    return this.cachedURL('preview:'+file.sha256,async()=>{
+      const generation=this.store.generation;
+      const saved=this.store.demo?(await demoFile(file.id))?.preview:await this.store.github.preview(file).catch(()=>null);
+      if(generation!==this.store.generation)throw new Error('Connection changed.');if(saved)return saved;
+      const original=await this.blob(file);if(generation!==this.store.generation)throw new Error('Connection changed.');
+      const preview=await createThumbnail(original).catch(()=>null);
+      if(generation!==this.store.generation)throw new Error('Connection changed.');
+      if(preview&&this.store.canWrite)await this.savePreview(file,preview).catch(()=>{});
+      return preview||original;
+    });
+  }
+  async savePreview(file,blob){
+    if(file.size<=PREVIEW_THRESHOLD)return;
+    if(!this.store.canWrite)throw new Error('This connection is read-only.');
+    if(this.store.demo){const entry=await demoFile(file.id);if(entry)await demoFile(file.id,{...entry,preview:blob});}
+    else await this.store.github.savePreview(file,blob);
+  }
+  clear(){for(const url of this.urls.values())URL.revokeObjectURL(url);this.urls.clear();this.pending.clear();}
   async index(file,text){text=new TextDecoder().decode(new TextEncoder().encode(text).slice(0,180000));if(this.store.demo){const entry=await demoFile(file.id);await demoFile(file.id,{...entry,text});}else await this.store.github.index(file,text);return !!text.trim();}
   async text(file){return this.store.demo?(await demoFile(file.id))?.text||'':await this.store.github.text(file);}
   async search(query){if(!this.store.demo)return this.store.github.search(query,this.store.list('document'));

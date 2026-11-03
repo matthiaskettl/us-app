@@ -1,5 +1,5 @@
-const VERSION='together-c193bf679d960684';
-const SHELL=['./','./index.html','./style.css','./app.js','./core.js','./store.js','./crypto.js','./household.js','./files.js','./scanner.js','./github.js','./transit.js','./config.js','./manifest.webmanifest','./icons/icon.svg','./icons/icon-192.png','./icons/icon-512.png','./icons/maskable-512.png'];
+const VERSION='together-c1f47ae06ba28f1e';
+const SHELL=['./','./index.html','./style.css','./app.js','./core.js','./store.js','./crypto.js','./household.js','./files.js','./images.js','./scanner.js','./github.js','./transit.js','./config.js','./manifest.webmanifest','./icons/icon.svg','./icons/icon-192.png','./icons/icon-512.png','./icons/maskable-512.png'];
 const CACHE=VERSION+':'+self.registration.scope;
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)));});
 self.addEventListener('message',event=>{if(event.data==='SKIP_WAITING')self.skipWaiting();});

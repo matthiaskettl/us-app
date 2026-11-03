@@ -2,6 +2,7 @@ import {ROUTES,snapshotForDisplay,latestSnapshot,waitForJourneySnapshot} from '.
 import {uid,today,addDays,newAppointment,berlinDateTime,appointmentOnDate,validateRecord,validateFile} from './core.js';
 import {Files,extractText,jpegPDF,readSelectedFiles} from './files.js';
 import {Scanner} from './scanner.js';
+import {preparePhoto,isPhoto} from './images.js';
 
 export function createHousehold(ctx){
   const {store,$,esc,icon,button,heading,empty,input,textarea,select,whoOptions,modal,closeModal,formFooter,toast,render,person,avatar,taskRow}=ctx;
@@ -13,10 +14,10 @@ export function createHousehold(ctx){
   try{const saved=JSON.parse(localStorage.getItem('together-journey-directions'));for(const group of Object.keys(transitDirections))if(['outbound','return'].includes(saved?.[group]))transitDirections[group]=saved[group];}catch{}
   const query=()=>ctx.search().trim();
   const metadataMatch=data=>query().split(/\s+/).every(q=>normalize(JSON.stringify(data)).includes(normalize(q)));
-  let readingFiles=null;
-  function cleanup(){readingFiles=null;scan=null;scanOriginal=null;staged=[];edit=null;}
-  function attachments(){return [...(edit?.data.files||[]).map(f=>({...f,saved:true})),...staged.map(s=>({id:s.id,name:s.file.name,size:s.file.size,type:s.file.type,saved:false}))];}
-  function attachmentsHTML(){return attachments().map(f=>`<div class="attachment-row"><span class="attachment-type">${icon(f.type.startsWith('image/')?'camera':'document')}</span><div><strong>${esc(f.name)}</strong><small>${fileSizes(f.size)}${f.saved?' · uploaded':' · ready to upload'}</small></div>${f.saved&&f.type.startsWith('image/')?button('View','view-photo','text-button',`data-id="${f.id}"`):''}${f.saved?button('Download','download-file','text-button',`data-id="${f.id}"`):''}${store.canWrite?button(icon('close'),'remove-attachment','icon-button',`data-id="${f.id}" aria-label="Remove ${esc(f.name)}"`):''}</div>`).join('')||'<p class="muted">No files attached yet.</p>';}
+  let readingFiles=null;const stagedURLs=new Set();
+  function cleanup(){readingFiles=null;scan=null;scanOriginal=null;staged=[];edit=null;for(const url of stagedURLs)URL.revokeObjectURL(url);stagedURLs.clear();}
+  function attachments(){return [...(edit?.data.files||[]).map(f=>({...f,saved:true})),...staged.map(s=>({id:s.id,name:s.file.name,size:s.file.size,type:s.file.type,saved:false,originalSize:s.original?.size,optimized:!!s.optimizedFile&&s.file===s.optimizedFile,canOptimize:!!s.optimizedFile}))];}
+  function attachmentsHTML(){return attachments().map(f=>`<div class="attachment-row"><span class="attachment-type">${icon(f.type.startsWith('image/')?'camera':'document')}</span><div><strong>${esc(f.name)}</strong><small>${f.optimized?`${fileSizes(f.originalSize)} → ${fileSizes(f.size)} · ${Math.round((1-f.size/f.originalSize)*100)}% smaller`:fileSizes(f.size)}${f.saved?' · uploaded':' · ready to upload'}</small></div>${f.type.startsWith('image/')?button('View','view-photo','text-button',`data-id="${f.id}"`):''}${!f.saved&&f.canOptimize?button(f.optimized?'Use original':'Use smaller photo','toggle-photo-size','text-button',`data-id="${f.id}"`):''}${f.saved?button('Download','download-file','text-button',`data-id="${f.id}"`):''}${store.canWrite?button(icon('close'),'remove-attachment','icon-button',`data-id="${f.id}" aria-label="Remove ${esc(f.name)}"`):''}</div>`).join('')||'<p class="muted">No files attached yet.</p>';}
   const editorFooter=(label,existing)=>`${existing&&store.canWrite?button('Delete this entry','remove-household-record','danger'):''}${store.canWrite?formFooter(label):button('Close','close','secondary')}`;
 
   function appointmentRow(record){const d=record.data;return `<button type="button" class="appointment-row ${d.status==='cancelled'?'cancelled':''}" data-action="edit-appointment" data-id="${record.id}"><span class="appointment-time">${d.allDay?'All day':esc(d.start.slice(11))}<small>${esc(d.start.slice(0,10).split('-').reverse().slice(0,2).join('.'))}</small></span><span class="appointment-copy"><strong>${esc(d.title)}</strong><small>${esc(d.location||'No location set')}${d.status!=='confirmed'?' · '+d.status:''}</small></span>${avatar(d.assignee)}</button>`;}
@@ -75,11 +76,11 @@ export function createHousehold(ctx){
   }
   function dashboard(){return `${personPanels()}<section id="transit-board">${transitHTML()}</section>`;}
 
-  function damageView(){const all=store.list('damage'),rows=all.filter(r=>metadataMatch(r.data)&&(damageStatus==='all'||r.data.status===damageStatus)).sort((a,b)=>b.data.date.localeCompare(a.data.date));return `${heading('','Flat gallery','','new-damage','Record damage')}<div class="filter-bar"><div class="search-field">${icon('search')}<input id="search" value="${esc(query())}" aria-label="Search damages" placeholder="Search room, description or title…"></div>${[['all','All'],['open','Open'],['reported','Reported'],['fixed','Fixed']].map(([id,label])=>button(label,'damage-status',damageStatus===id?'pill active':'pill',`data-status="${id}"`)).join('')}</div><div class="damage-grid">${rows.map(r=>`<button type="button" class="damage-card" data-action="edit-damage" data-id="${r.id}"><div class="damage-photo">${r.data.files[0]?`<img data-file-image="${r.data.files[0].id}" alt="${esc(r.data.title)}" loading="lazy">`:icon('camera')}<span class="photo-count">${r.data.files.length} photo${r.data.files.length===1?'':'s'}</span></div><div class="damage-caption"><span class="tag status-${r.data.status}">${r.data.status}</span><h3>${esc(r.data.title)}</h3><p>${esc(r.data.description)}</p><small>${esc(r.data.room||'Room not specified')} · ${esc(r.data.date)}</small></div></button>`).join('')}</div>${rows.length?'':empty('No damage records','Add photos of your flat.','new-damage','Record damage')}<p class="fine">Original photos are saved unchanged.</p>`;}
+  function damageView(){const all=store.list('damage'),rows=all.filter(r=>metadataMatch(r.data)&&(damageStatus==='all'||r.data.status===damageStatus)).sort((a,b)=>b.data.date.localeCompare(a.data.date));return `${heading('','Flat gallery','','new-damage','Record damage')}<div class="filter-bar"><div class="search-field">${icon('search')}<input id="search" value="${esc(query())}" aria-label="Search damages" placeholder="Search room, description or title…"></div>${[['all','All'],['open','Open'],['reported','Reported'],['fixed','Fixed']].map(([id,label])=>button(label,'damage-status',damageStatus===id?'pill active':'pill',`data-status="${id}"`)).join('')}</div><div class="damage-grid">${rows.map(r=>`<button type="button" class="damage-card" data-action="edit-damage" data-id="${r.id}"><div class="damage-photo">${r.data.files[0]?`<img data-file-image="${r.data.files[0].id}" alt="${esc(r.data.title)}" loading="lazy">`:icon('camera')}<span class="photo-count">${r.data.files.length} photo${r.data.files.length===1?'':'s'}</span></div><div class="damage-caption"><span class="tag status-${r.data.status}">${r.data.status}</span><h3>${esc(r.data.title)}</h3><p>${esc(r.data.description)}</p><small>${esc(r.data.room||'Room not specified')} · ${esc(r.data.date)}</small></div></button>`).join('')}</div>${rows.length?'':empty('No damage records','Add photos of your flat.','new-damage','Record damage')}<p class="fine">Photos use Full HD compression, with an option to keep the original.</p>`;}
   function documentsView(){const all=store.list('document'),labels=[...new Set(all.flatMap(r=>r.data.labels))].sort(),rows=all.filter(r=>(docLabel==='all'||r.data.labels.includes(docLabel))&&(!query()||metadataMatch(r.data)||r.data.files.some(f=>contentMatches.some(m=>m.id===f.id)))).sort((a,b)=>b.data.date.localeCompare(a.data.date));return `${heading('','Documents','','new-document','Upload document')}<div class="filter-bar"><div class="search-field">${icon('search')}<input id="search" value="${esc(query())}" maxlength="120" aria-label="Search documents" placeholder="Search titles, labels, descriptions and document text…"></div>${button(icon('download')+'Backup with files','export-file-backup','secondary')}</div><div class="list-tabs">${['all',...labels].map(label=>button(label==='all'?'All documents':esc(label),'doc-label',docLabel===label?'pill active':'pill',`data-label="${esc(label)}"`)).join('')}</div>${searchError?`<p class="notice">${esc(searchError)}</p>`:''}<div class="document-list">${rows.map(r=>{const match=r.data.files.map(f=>contentMatches.find(m=>m.id===f.id)).find(Boolean);return `<button type="button" class="document-card" data-action="edit-document" data-id="${r.id}"><span class="document-icon">${icon('document')}</span><span class="document-info"><strong>${esc(r.data.title)}</strong><span>${esc(r.data.description)}</span><span class="document-labels">${r.data.labels.map(l=>`<span class="tag">${esc(l)}</span>`).join('')}<small>${r.data.date} · ${r.data.files.length} file${r.data.files.length===1?'':'s'}${r.data.files.some(f=>f.searchable)?' · text searchable':''}</small></span>${match?`<span class="search-snippet">…${esc(match.snippet)}…</span>`:''}</span>${icon('arrow')}</button>`;}).join('')}</div>${rows.length?'':empty(query()?'No matching documents':'No documents yet',query()?'Try a different search or label.':'Upload a file or scan a document.','new-document','Add document')}<p class="fine">Search includes text PDFs, DOCX and text files. Scans use labels and descriptions; no OCR.</p>`;}
   function fileEditor(kind,id){
     const record=id?store.get(id):null,data=structuredClone(record?.data||{title:'',date:today(),description:'',files:[],...(kind==='damage'?{room:'',status:'open'}:{labels:[]})});
-    modal(kind==='damage'?(id?'Damage record':'Record damage'):(id?'Document details':'Add an important document'),`<form id="${kind}-form"><fieldset ${!store.canWrite?'disabled':''}>${input('title',kind==='damage'?'What is damaged?':'Document name',data.title,'text','required maxlength="200" autofocus')}<div class="form-row">${input('date',kind==='damage'?'Date observed':'Document date',data.date,'date','required')}${kind==='damage'?input('room','Room / area',data.room,'text','maxlength="100" placeholder="Kitchen, bathroom…"'):input('labels','Labels (comma separated)',data.labels.join(', '),'text','maxlength="1000" placeholder="Bank, Flat, Internet, Contracts"')}</div>${kind==='damage'?select('status','Status',[['open','Open'],['reported','Reported'],['fixed','Fixed']],data.status):''}${textarea('description','Description',data.description,'rows="3" maxlength="10000"')}<div class="upload-controls"><label class="secondary upload-button">${icon('upload')} Upload ${kind==='damage'?'photos':'files'}<input id="attachment-input" type="file" ${kind==='damage'?'accept="image/jpeg,image/png,image/webp"':'accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.rtf,image/jpeg,image/png,image/webp"'} multiple></label>${kind==='damage'?`<label class="secondary upload-button">${icon('camera')} Take a photo<input id="camera-input" type="file" accept="image/*" capture="environment"></label>`:`<label class="secondary upload-button">${icon('camera')} Scan a document<input id="scan-input" type="file" accept="image/*" capture="environment"></label>`}</div><p class="fine">Up to 20 files · 20 MB each. ${kind==='damage'?'Photos are saved unchanged.':'Scanning and text extraction happen on this device.'}</p></fieldset><div id="scan-panel"></div><div id="attachments"></div><div id="photo-preview"></div><p id="upload-progress" role="status" aria-live="polite"></p>${editorFooter(kind==='damage'?'Save damage record':'Save document',!!id)}</form>`,true);
+    modal(kind==='damage'?(id?'Damage record':'Record damage'):(id?'Document details':'Add an important document'),`<form id="${kind}-form"><fieldset ${!store.canWrite?'disabled':''}>${input('title',kind==='damage'?'What is damaged?':'Document name',data.title,'text','required maxlength="200" autofocus')}<div class="form-row">${input('date',kind==='damage'?'Date observed':'Document date',data.date,'date','required')}${kind==='damage'?input('room','Room / area',data.room,'text','maxlength="100" placeholder="Kitchen, bathroom…"'):input('labels','Labels (comma separated)',data.labels.join(', '),'text','maxlength="1000" placeholder="Bank, Flat, Internet, Contracts"')}</div>${kind==='damage'?select('status','Status',[['open','Open'],['reported','Reported'],['fixed','Fixed']],data.status):''}${textarea('description','Description',data.description,'rows="3" maxlength="10000"')}<div class="upload-controls"><label class="secondary upload-button">${icon('upload')} Upload ${kind==='damage'?'photos':'files'}<input id="attachment-input" type="file" ${kind==='damage'?'accept="image/jpeg,image/png,image/webp"':'accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.rtf,image/jpeg,image/png,image/webp"'} multiple></label>${kind==='damage'?`<label class="secondary upload-button">${icon('camera')} Take a photo<input id="camera-input" type="file" accept="image/*" capture="environment"></label>`:`<label class="secondary upload-button">${icon('camera')} Scan a document<input id="scan-input" type="file" accept="image/*" capture="environment"></label>`}</div><p class="fine">Up to 20 files · 20 MB each. ${kind==='damage'?'Photos use Full HD compression. You can choose the original before saving.':'Documents keep their original files. For photos, you can choose a smaller version.'}</p></fieldset><div id="scan-panel"></div><div id="attachments"></div><div id="photo-preview"></div><p id="upload-progress" role="status" aria-live="polite"></p>${editorFooter(kind==='damage'?'Save damage record':'Save document',!!id)}</form>`,true);
     edit={kind,id:id||uid(),data};staged=[];$('#attachments').innerHTML=attachmentsHTML();ctx.setCleanup(cleanup);
   }
   function setProgress(message){const el=$('#upload-progress');if(el)el.textContent=message;}
@@ -96,7 +97,7 @@ export function createHousehold(ctx){
       const copies=await readSelectedFiles(chosen);
       if(!current())return;
       if(el.id==='scan-input')await startScan(copies[0]);else await stage(copies);
-      if(current())setProgress(el.id==='scan-input'?'':`${copies.length} file${copies.length===1?'':'s'} ready. Save to upload.`);
+      if(current())setProgress(el.id==='scan-input'?'':staged.some(item=>item.note)?'Files ready. Some photos could not be optimized; their originals will be uploaded.':`${copies.length} file${copies.length===1?'':'s'} ready. Save to upload.`);
     }catch(error){if(current()){setProgress('');ctx.formError(error);}}
     finally{
       el.value='';
@@ -108,9 +109,18 @@ export function createHousehold(ctx){
     for(const file of list){if(!file.size||file.size>20*1024*1024)throw new Error('Each file must be between 1 byte and 20 MB.');if(edit.kind==='damage'&&!['image/jpeg','image/png','image/webp'].includes(file.type))throw new Error('Choose JPEG, PNG or WebP for original damage photos. Convert unsupported HEIC photos first.');}
   }
   async function stage(list){
-    validateAttachments(list);
-    staged.push(...list.map(file=>({id:uid(),file})));
-    $('#attachments').innerHTML=attachmentsHTML();
+    validateAttachments(list);const target=edit,generation=store.generation,items=[];
+    for(const original of list){
+      if(edit!==target||generation!==store.generation)return;
+      let prepared={file:original,thumbnail:null,optimized:false};
+      if(isPhoto(original)){
+        setProgress('Preparing photo: '+original.name);
+        try{prepared=await preparePhoto(original);}catch{prepared.note='Could not optimize this photo; the original will be uploaded.';}
+      }
+      if(edit!==target||generation!==store.generation)return;
+      items.push({id:uid(),original,file:target.kind==='damage'?prepared.file:original,optimizedFile:prepared.optimized?prepared.file:null,thumbnail:prepared.thumbnail,note:prepared.note});
+    }
+    staged.push(...items);$('#attachments').innerHTML=attachmentsHTML();
   }
   async function startScan(file){
     if(file.size>20*1024*1024)throw new Error('Choose an image under 20 MB.');
@@ -120,11 +130,12 @@ export function createHousehold(ctx){
   function updateCornerControls(){if(!scan)return;const i=Number($('[name=corner]').value);$('#corner-x').value=scan.points[i][0]*100;$('#corner-y').value=scan.points[i][1]*100;}
   async function saveFiles(data){
     if(readingFiles)throw new Error('Wait for the selected files to finish reading before saving.');
-    const target=edit,generation=store.generation,check=()=>{if(edit!==target||store.generation!==generation)throw new Error('The editor or connection changed. Saving stopped; originals already uploaded remain in the original repository.');};if(scan)throw new Error('Finish the scan first: crop it or use the original photo.');if(!attachments().length)throw new Error('Attach at least one file before saving.');
+    const target=edit,generation=store.generation,check=()=>{if(edit!==target||store.generation!==generation)throw new Error('The editor or connection changed. Saving stopped; files already uploaded remain in the original repository.');};if(scan)throw new Error('Finish the scan first: crop it or use the original photo.');if(!attachments().length)throw new Error('Attach at least one file before saving.');
     const uploaded=[...target.data.files];let warnings=[];
     for(let i=0;i<staged.length;i++){
       const item=staged[i];setProgress(`Uploading ${i+1} of ${staged.length}: ${item.file.name}`);
       const descriptor=item.uploaded||await files.upload(item.file,item.id);check();item.uploaded=descriptor;
+      if(item.thumbnail&&!item.previewSaved){try{await files.savePreview(descriptor,item.thumbnail);check();item.previewSaved=true;}catch{check();warnings.push('Gallery preview unavailable; it will be retried when opened.');}}
       if(target.kind==='document'&&!item.extracted){
         try{setProgress('Extracting searchable text on this device…');const result=await extractText(item.file);check();descriptor.searchable=!!result.text.trim()&&await files.index(descriptor,result.text);check();if(result.note)warnings.push(result.note);item.extracted=true;}
         catch{check();warnings.push(`${item.file.name}: text indexing was unavailable; the original file is saved.`);descriptor.searchable=false;}
@@ -133,11 +144,11 @@ export function createHousehold(ctx){
     }
     check();
     const value={...target.data,title:data.title,date:data.date,description:data.description,files:uploaded,...(target.kind==='damage'?{room:data.room,status:data.status}:{labels:data.labels.split(',').map(t=>t.trim()).filter(Boolean)})};
-    const undo=store.change(target.kind,target.id,value);closeModal();toast(target.kind==='damage'?'Damage recorded. Originals preserved.':'Document saved.'+(warnings.some(w=>w.includes('unavailable'))?' Text indexing unavailable for some files.':''),undo);render();
+    const undo=store.change(target.kind,target.id,value);closeModal();toast(target.kind==='damage'?'Damage recorded.':'Document saved.'+(warnings.some(w=>w.includes('unavailable'))?' Text indexing unavailable for some files.':''),undo);render();
   }
 
   async function hydrate(){
-    imageObserver?.disconnect();imageObserver=new IntersectionObserver(entries=>{for(const entry of entries){if(!entry.isIntersecting)continue;imageObserver.unobserve(entry.target);const id=entry.target.dataset.fileImage,file=store.records.flatMap(r=>r.data.files||[]).find(f=>f.id===id);if(!file)continue;files.url(file).then(url=>{if(entry.target.isConnected)entry.target.src=url;}).catch(()=>{entry.target.alt='Photo unavailable offline. Open the record to retry.';});}},{rootMargin:'150px'});
+    imageObserver?.disconnect();imageObserver=new IntersectionObserver(entries=>{for(const entry of entries){if(!entry.isIntersecting)continue;imageObserver.unobserve(entry.target);const id=entry.target.dataset.fileImage,file=store.records.flatMap(r=>r.data.files||[]).find(f=>f.id===id);if(!file)continue;files.previewURL(file).then(url=>{if(entry.target.isConnected)entry.target.src=url;}).catch(()=>{entry.target.alt='Photo unavailable offline. Open the record to retry.';});}},{rootMargin:'150px'});
     document.querySelectorAll('[data-file-image]').forEach(img=>imageObserver.observe(img));
     if(transitGeneration!==store.generation){files.clear();transitController?.abort();transitController=null;transitLoading=false;transitGeneration=store.generation;transit=null;lastTransit=0;transitStatus='';transitNeedsHelp=false;}
     if(ctx.page()==='home')loadTransit();
@@ -145,10 +156,10 @@ export function createHousehold(ctx){
   async function fullBackup(){
     const generation=store.generation,check=()=>{if(store.generation!==generation)throw new Error('Connection changed. Backup stopped.');};
     const {zipSync,strToU8}=await import('./vendor/fflate.mjs');check();const records=structuredClone(store.records),unique=[...new Map(records.flatMap(r=>r.data.files||[]).map(f=>[f.id,f])).values()];
-    if(unique.reduce((sum,f)=>sum+f.size,0)>100*1024*1024)throw new Error('This browser export supports up to 100 MB. Download larger originals individually or clone your private data repository.');
+    if(unique.reduce((sum,f)=>sum+f.size,0)>100*1024*1024)throw new Error('This browser export supports up to 100 MB. Download larger files individually or clone your private data repository.');
     const archive={'household.json':strToU8(JSON.stringify({format:'together-backup',version:1,records,exportedAt:new Date().toISOString()}))};
-    for(const [i,file]of unique.entries()){check();toast(`Preparing backup: ${i+1}/${unique.length} originals…`);archive['files/'+file.id]=new Uint8Array(await(await files.blob(file)).arrayBuffer());check();archive['text/'+file.id+'.txt']=strToU8(await files.text(file));}check();
-    const blob=new Blob([zipSync(archive,{level:0})],{type:'application/zip'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`together-with-files-${today()}.zip`;a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast('Backup includes original files and document search text.');
+    for(const [i,file]of unique.entries()){check();toast(`Preparing backup: ${i+1}/${unique.length} files…`);archive['files/'+file.id]=new Uint8Array(await(await files.blob(file)).arrayBuffer());check();archive['text/'+file.id+'.txt']=strToU8(await files.text(file));}check();
+    const blob=new Blob([zipSync(archive,{level:0})],{type:'application/zip'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`together-with-files-${today()}.zip`;a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast('Backup includes stored files and document search text.');
   }
   async function importArchive(file){
     if(file.size>110*1024*1024)throw new Error('Choose an archive smaller than 110 MB.');
@@ -158,7 +169,7 @@ export function createHousehold(ctx){
     const records=backup.records.filter(r=>!r.deleted),ids=new Set();for(const r of records){if(!/^[\w-]{8,80}$/.test(r.id)||ids.has(r.id))throw new Error('Duplicate or invalid record ID.');ids.add(r.id);r.data=validateRecord(r.kind,r.data);}
     const allFiles=[...new Map(records.flatMap(r=>r.data.files||[]).map(f=>[f.id,f])).values()];
     for(const f of allFiles){validateFile(f);const bytes=archive['files/'+f.id];if(!bytes||bytes.length!==f.size)throw new Error('A file is missing from the archive.');const sha=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');if(sha!==f.sha256)throw new Error('An original file does not match its checksum.');}
-    modal('Restore this household archive?',`<p>Restore ${records.length} records and ${allFiles.length} original files. Matching record IDs will be updated; other records will stay. Vault entries still need their original passphrase.</p><div class="modal-actions">${button('Cancel','close')}${button('Restore archive','confirm-file-restore','primary')}</div><p class="form-error" role="alert"></p>`);
+    modal('Restore this household archive?',`<p>Restore ${records.length} records and ${allFiles.length} stored files. Matching record IDs will be updated; other records will stay. Vault entries still need their original passphrase.</p><div class="modal-actions">${button('Cancel','close')}${button('Restore archive','confirm-file-restore','primary')}</div><p class="form-error" role="alert"></p>`);
     pendingRestore={records,allFiles,archive};
   }
   let pendingRestore=null;
@@ -169,15 +180,24 @@ export function createHousehold(ctx){
     if(name==='damage-status'){damageStatus=el.dataset.status;render();return true;}
     if(name==='doc-label'){docLabel=el.dataset.label;render();return true;}
     if(name==='remove-attachment'){edit.data.files=edit.data.files.filter(f=>f.id!==id);staged=staged.filter(f=>f.id!==id);$('#attachments').innerHTML=attachmentsHTML();return true;}
-    if(name==='view-photo'){const file=edit?.data.files.find(f=>f.id===id),target=edit;if(file){const url=await files.url(file);if(edit===target)$('#photo-preview').innerHTML=`<figure class="original-preview"><div>${button('Close preview','close-photo','text-button')}</div><img src="${esc(url)}" alt="${esc(file.name)}"><figcaption>${esc(file.name)} · original photo</figcaption></figure>`;}return true;}
+    if(name==='toggle-photo-size'){
+      const item=staged.find(f=>f.id===id);if(!store.canWrite||!item?.optimizedFile||readingFiles||$('#'+edit.kind+'-form button[type=submit]')?.disabled)return true;
+      item.file=item.file===item.optimizedFile?item.original:item.optimizedFile;
+      if(item.uploaded){item.id=uid();item.uploaded=null;item.extracted=false;item.previewSaved=false;}
+      $('#attachments').innerHTML=attachmentsHTML();$('#photo-preview').innerHTML='';return true;
+    }
+    if(name==='view-photo'){
+      const saved=edit?.data.files.find(f=>f.id===id),item=staged.find(f=>f.id===id),file=saved||item?.file,target=edit;
+      if(file){let url;if(saved)url=await files.url(file);else{url=URL.createObjectURL(file);stagedURLs.add(url);}if(edit===target)$('#photo-preview').innerHTML=`<figure class="original-preview"><div>${button('Close preview','close-photo','text-button')}</div><img src="${esc(url)}" alt="${esc(file.name)}"><figcaption>${esc(file.name)} · ${fileSizes(file.size)}</figcaption></figure>`;}return true;
+    }
     if(name==='close-photo'){$('#photo-preview').innerHTML='';return true;}
     if(name==='download-file'){const file=[...(edit?.data.files||[]),...store.records.flatMap(r=>r.data.files||[])].find(f=>f.id===id);if(file)await files.download(file);return true;}
     if(name==='rotate-scan'){scan.rotate();updateCornerControls();return true;}
     if(name==='detect-scan'){scan.detect();updateCornerControls();return true;}
-    if(name==='original-scan'){await stage([scanOriginal]);scan=null;scanOriginal=null;$('#scan-panel').innerHTML='';return true;}
+    if(name==='original-scan'){const target=edit,scanner=scan;el.disabled=true;try{await stage([scanOriginal]);if(edit!==target||scan!==scanner)return true;scan=null;scanOriginal=null;$('#scan-panel').innerHTML='';return true;}finally{if(el.isConnected)el.disabled=false;}}
     if(name==='apply-scan'){
       const target=edit,scanner=scan,mode=$('[name=scanMode]').value,format=$('[name=scanFormat]').value,name=scanOriginal.name.replace(/\.[^.]+$/,'')+'-scan.'+(format==='pdf'?'pdf':'jpg');el.disabled=true;setProgress('Straightening and cropping the page…');
-      try{const result=await scanner.scan(mode);if(edit!==target||scan!==scanner)return true;const blob=format==='pdf'?jpegPDF(new Uint8Array(await result.blob.arrayBuffer()),result.width,result.height):result.blob;await stage([new File([blob],name,{type:blob.type})]);scan=null;scanOriginal=null;$('#scan-panel').innerHTML='';setProgress('Scan ready. Save the document to upload it.');}finally{el.disabled=false;}return true;
+      try{const result=await scanner.scan(mode);if(edit!==target||scan!==scanner)return true;const blob=format==='pdf'?jpegPDF(new Uint8Array(await result.blob.arrayBuffer()),result.width,result.height):result.blob;await stage([new File([blob],name,{type:blob.type})]);if(edit!==target||scan!==scanner)return true;scan=null;scanOriginal=null;$('#scan-panel').innerHTML='';setProgress('Scan ready. Save the document to upload it.');}finally{el.disabled=false;}return true;
     }
     if(name==='remove-household-record'){
       const target=edit;modal('Delete this entry?',`<p>Remove “${esc(target.data.title)}” from your shared space? Original files remain in the private repository and Git history so this can be undone.</p><div class="modal-actions">${button('Cancel','close')}${button('Delete entry','confirm-household-delete','danger')}</div>`);edit=target;return true;

@@ -118,21 +118,39 @@ export class GitHub {
     }
   });}
   filePath(file){validateFile(file);if(/[\x00-\x1f\x7f/\\]/.test(file.name)||['.','..'].includes(file.name))fail('Invalid filename.');return `together/files/${file.id}/${file.name}`;}
+  previewPath(file){validateFile(file);return `together/previews/${file.sha256}.jpg`;}
+  async preview(file){
+    await this.verify();const meta=await this.metadata(this.previewPath(file),true);if(!meta)return null;
+    if(meta.size<1||meta.size>200000)fail('Invalid gallery preview size.');
+    const bytes=meta.encoding==='base64'?decodeBytes(meta.content):await this.bytesAtSHA(meta.sha);
+    if(bytes.length!==meta.size||bytes[0]!==255||bytes[1]!==216||bytes[2]!==255||await gitBlobSHA(bytes)!==meta.sha)fail('Invalid gallery preview.');
+    return new Blob([bytes],{type:'image/jpeg'});
+  }
+  savePreview(file,blob){return this.enqueue(async()=>{
+    await this.verify();if(this.key().role==='viewer')fail('This connection is read-only.',403);
+    if(blob.type!=='image/jpeg'||!blob.size||blob.size>200000)fail('Invalid gallery preview.');
+    const path=this.previewPath(file),bytes=new Uint8Array(await blob.arrayBuffer());
+    if(bytes[0]!==255||bytes[1]!==216||bytes[2]!==255)fail('Invalid gallery preview.');
+    for(let attempt=0;attempt<3;attempt++){
+      if(await this.metadata(path,true))return;
+      try{await this.put(path,bytes,null,'Together: add gallery preview');return;}catch(e){if(![409,422].includes(e.status)||attempt===2)throw e;}
+    }
+  });}
   upload(file,id){return this.enqueue(async()=>{
     await this.verify();if(this.key().role==='viewer')fail('This connection is read-only.',403);
     if(!file.size||file.size>20*1024*1024)fail('Choose a non-empty file no larger than 20 MB.');
     const bytes=new Uint8Array(await file.arrayBuffer()),descriptor=validateFile({id,name:file.name,type:file.type||'application/octet-stream',size:bytes.length,sha256:await checksum(bytes)}),path=this.filePath(descriptor),sha=await gitBlobSHA(bytes);
     for(let attempt=0;attempt<3;attempt++){
       const existing=await this.metadata(path,true);
-      if(existing){if(existing.sha!==sha)fail('This original file already exists with different contents.',409);return descriptor;}
-      try{await this.put(path,bytes,null,'Together: add original file');return descriptor;}catch(e){if(![409,422].includes(e.status)||attempt===2)throw e;}
+      if(existing){if(existing.sha!==sha)fail('This file already exists with different contents.',409);return descriptor;}
+      try{await this.put(path,bytes,null,'Together: add file');return descriptor;}catch(e){if(![409,422].includes(e.status)||attempt===2)throw e;}
     }
   });}
   async download(file){
     await this.verify();const path=this.filePath(file),meta=await this.metadata(path);
-    if(meta.size!==file.size)fail('This original does not match its saved checksum. Check the repository history or restore a backup.');
+    if(meta.size!==file.size)fail('This file does not match its saved checksum. Check the repository history or restore a backup.');
     const bytes=meta.encoding==='base64'?decodeBytes(meta.content):await this.bytesAtSHA(meta.sha);
-    if(bytes.length!==file.size||await checksum(bytes)!==file.sha256)fail('This original does not match its saved checksum. Check the repository history or restore a backup.');
+    if(bytes.length!==file.size||await checksum(bytes)!==file.sha256)fail('This file does not match its saved checksum. Check the repository history or restore a backup.');
     return new Blob([bytes],{type:file.type});
   }
   index(file,text){return this.enqueue(async()=>{
