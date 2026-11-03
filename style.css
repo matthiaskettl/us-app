@@ -402,3 +402,16 @@ dialog::backdrop { background: #182c2580; backdrop-filter: blur(4px); }
   .workspace { margin: 0; width: 100%; padding: 0; }
   #main { padding: 0; }
 }
+
+/* Selective shopping reset and journey refresh feedback. */
+.repick-items { max-height: min(50dvh,420px); overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 12px; }
+.repick-items h3 { font-size: 12px; padding: 13px 15px; background: var(--soft); position: sticky; top: 0; }
+.repick-item { flex-direction: row; align-items: center; gap: 13px; padding: 13px 15px; cursor: pointer; min-height: 64px; border-top: 1px solid var(--line); }
+.repick-item:hover, .repick-item:has(input:checked) { background: var(--bg); }
+.repick-item > span { min-width: 0; }
+.repick-item strong { display: block; font-size: 14px; overflow-wrap: anywhere; }
+.repick-item small { display: block; font-size: 11px; color: var(--muted); margin-top: 3px; }
+.repick-item input { min-height: 20px; width: 20px; height: 20px; }
+.transit-status { margin: 0 0 12px; font-size: 12px; color: var(--green); line-height: 1.6; }
+.transit-status:empty { display: none; }
+.transit-status a { text-decoration: underline; }

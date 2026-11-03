@@ -73,6 +73,27 @@ export class GitHub {
     this.etag=file.etag;this.snapshot={sha:file.sha,data};return structuredClone(this.snapshot);
   }
   async state(){await this.verify();const snapshot=await this.readState();return {...snapshot.data,key:this.key()};}
+  async journeyJSON(path){
+    const meta=await this.metadata(path,true);if(!meta)return null;
+    if(meta.size>512000)fail('The journey file exceeds its size limit.');
+    const bytes=meta.encoding==='base64'?decodeBytes(meta.content):await this.bytesAtSHA(meta.sha);
+    return JSON.parse(new TextDecoder().decode(bytes));
+  }
+  readJourneySnapshot(){return this.journeyJSON('together/journeys.json');}
+  requestJourneyRefresh(){return this.enqueue(async()=>{
+    await this.verify();if(this.key().role==='viewer')fail('A read-only connection can load saved journeys but cannot request a new timetable.',403);
+    if(!await this.metadata('.github/workflows/journeys.yml',true))fail('Publish .github/workflows/journeys.yml in your private repository to enable on-demand refresh.',412);
+    const path='together/journey-request.json';
+    for(let attempt=0;attempt<3;attempt++){
+      const meta=await this.metadata(path,true);let previous=null;
+      if(meta){if(meta.size>4096)fail('Invalid journey refresh request file.');try{previous=JSON.parse(new TextDecoder().decode(decodeBytes(meta.content)));}catch{fail('Invalid journey refresh request file.');}}
+      const age=Date.now()-Date.parse(previous?.requestedAt);
+      if(previous?.format==='together-journey-request'&&/^[\w-]{8,80}$/.test(previous.requestId)&&age>=0&&age<90000)return previous;
+      const request={format:'together-journey-request',version:1,requestId:crypto.randomUUID(),requestedAt:new Date().toISOString()};
+      try{await this.put(path,new TextEncoder().encode(JSON.stringify(request,null,2)+'\n'),meta?.sha,'Together: refresh connections');return request;}
+      catch(e){if(![409,422].includes(e.status)||attempt===2)throw e;}
+    }
+  });}
   enqueue(fn){const task=this.serial.then(fn);this.serial=task.catch(()=>{});return task;}
   async put(path,bytes,sha,message){return(await this.request(this.contentPath(path),{method:'PUT',body:{message,content:encodeBytes(bytes),branch:this.config.branch,...(sha?{sha}:{})}})).json();}
   change(op){return this.enqueue(async()=>{

@@ -1,11 +1,11 @@
-import {fetchSnapshot} from './transit.js';
+import {snapshotForDisplay,latestSnapshot,waitForJourneySnapshot} from './transit.js';
 import {uid,today,addDays,newAppointment,berlinDateTime,appointmentOnDate,validateRecord,validateFile} from './core.js';
 import {Files,extractText,jpegPDF} from './files.js';
 import {Scanner} from './scanner.js';
 
 export function createHousehold(ctx){
   const {store,$,esc,icon,button,heading,empty,input,textarea,select,whoOptions,modal,closeModal,formFooter,toast,render,person,avatar,taskRow}=ctx;
-  const files=new Files(store);let edit=null,staged=[],scan=null,scanOriginal=null,docLabel='all',damageStatus='all',contentMatches=[],searchError='',searchTimer,searchGeneration=0,imageObserver,transit=null,transitLoading=false,lastTransit=0,transitGeneration=-1;
+  const files=new Files(store);let edit=null,staged=[],scan=null,scanOriginal=null,docLabel='all',damageStatus='all',contentMatches=[],searchError='',searchTimer,searchGeneration=0,imageObserver,transit=null,transitLoading=false,lastTransit=0,transitGeneration=-1,transitController=null,transitStatus='',transitNeedsHelp=false;
   const fileSizes=size=>size<1024*1024?`${Math.ceil(size/1024)} KB`:`${(size/1024/1024).toFixed(1)} MB`;
   const clock=value=>new Date(value).toLocaleTimeString('de-DE',{timeZone:'Europe/Berlin',hour:'2-digit',minute:'2-digit'});
   const normalize=value=>String(value).normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase();
@@ -34,17 +34,40 @@ export function createHousehold(ctx){
   }).join('')}</div>`;}
   function journeyHTML(j,routeId,index){const first=j.legs[0],delay=Math.round((Date.parse(first.departure)-Date.parse(first.plannedDeparture))/60000),date=new Date(j.departure).toLocaleDateString('de-DE',{timeZone:'Europe/Berlin',day:'2-digit',month:'2-digit'});return `<button type="button" class="journey" data-action="journey-details" data-route="${routeId}" data-index="${index}"><span class="journey-time"><strong>${clock(j.departure)}</strong><small>${date}${delay>0?' · +'+delay+' min':''}</small></span><span class="journey-copy"><strong>${esc(j.legs.filter(l=>!l.walking).map(l=>l.line).join(' → '))}</strong><small>${clock(j.arrival)} arrival · ${j.duration} min · ${j.changes?j.changes+' change'+(j.changes===1?'':'s'):'direct'}</small><small>${esc(first.origin)}${first.platform?' · platform '+esc(first.platform):''}</small></span>${j.preferred&&routeId==='munich'?'<span class="tag preferred">RB16</span>':icon('arrow')}</button>`;}
   function transitHTML(){
-    const routes=transit?.routes||[{id:'munich',title:'München Hbf',journeys:[]},{id:'hospital',title:'Klinikum Ingolstadt',journeys:[]}];
+    const routes=transit?snapshotForDisplay(transit).routes:[{id:'munich',title:'München Hbf',journeys:[]},{id:'hospital',title:'Klinikum Ingolstadt',journeys:[]}];
     return `<div class="section-heading transit-heading"><div><h2>Next connections</h2><span class="transit-origin">From Ingolstadt Nord</span></div>${button(icon('sync')+(transitLoading?'Checking…':'Refresh'),'refresh-transit','text-button',transitLoading?'disabled':'')}</div><div class="transit-grid">${routes.map(route=>{
       const available=(route.journeys||[]).filter(j=>Date.parse(j.departure)>=Date.now());const selected=available.slice(0,3),preferred=route.id==='munich'&&available.find(j=>j.preferred);if(preferred&&!selected.includes(preferred))selected[2]=preferred;
-      return `<section class="panel transit-card"><div class="section-heading"><h3>${icon(route.id==='munich'?'train':'bus')}${esc(route.title)}</h3><span class="tag">${route.id==='munich'?'RB16 preferred':'Bus'}</span></div>${selected.length?selected.map(j=>journeyHTML(j,route.id,route.journeys.indexOf(j))).join(''):`<p class="transit-empty">${store.demo?'Connect to see departures.':transitLoading?'Loading…':route.error?esc(route.error):transit?'No upcoming journey returned. Check the planner.':'No departures loaded.'}</p>`}${route.stale?'<p class="transit-warning">Saved result · snapshot is outdated. Verify before travelling.</p>':''}<div class="transit-foot"><span>${route.updatedAt?'Checked '+clock(route.updatedAt):'Times in Europe/Berlin'} · no ICE</span><a href="https://www.bayern-fahrplan.de/" target="_blank" rel="noopener noreferrer">Bayern-Fahrplan ↗</a></div></section>`;
-    }).join('')}</div><p class="fine transit-attribution">Journey data: DEFAS Bayern / Bayern-Fahrplan. ${transit?.error?esc(transit.error):'Snapshots ~15 min · updates may be delayed.'}</p>`;
+      return `<section class="panel transit-card"><div class="section-heading"><h3>${icon(route.id==='munich'?'train':'bus')}${esc(route.title)}</h3><span class="tag">${route.id==='munich'?'RB16 preferred':'Bus'}</span></div>${selected.length?selected.map(j=>journeyHTML(j,route.id,transit.routes.find(r=>r.id===route.id).journeys.indexOf(j))).join(''):`<p class="transit-empty">${store.demo?'Connect to see departures.':transitLoading?'Loading…':route.error?esc(route.error):transit?'No upcoming journey returned. Check the planner.':'No departures loaded.'}</p>`}${route.stale?'<p class="transit-warning">Saved result · snapshot is outdated. Verify before travelling.</p>':''}<div class="transit-foot"><span>${route.updatedAt?'Updated '+clock(route.updatedAt):'Times in Europe/Berlin'} · no ICE</span><a href="https://www.bayern-fahrplan.de/" target="_blank" rel="noopener noreferrer">Bayern-Fahrplan ↗</a></div></section>`;
+    }).join('')}</div><p class="transit-status" role="status" aria-live="polite">${esc(transitStatus)}${transitNeedsHelp&&store.config?` <a href="https://github.com/${esc(store.config.repo)}/actions/workflows/journeys.yml" target="_blank" rel="noopener noreferrer">Check refresh job ↗</a>`:''}</p><p class="fine transit-attribution">Journey data: DEFAS Bayern / Bayern-Fahrplan. ${transit?.error?esc(transit.error):'Auto updates ~15 min · Refresh requests a new timetable.'}</p>`;
   }
   function refreshTransitHTML(){const el=$('#transit-board');if(el)el.innerHTML=transitHTML();}
   async function loadTransit(force=false){
-    if(store.demo||!store.config||transitLoading||(!force&&Date.now()-lastTransit<60000))return;
-    const generation=store.generation;transitLoading=true;lastTransit=Date.now();refreshTransitHTML();
-    try{const data=await fetchSnapshot();if(generation===store.generation)transit=data;}catch(e){if(generation===store.generation)transit={error:e.message,routes:[{id:'munich',title:'München Hbf',journeys:[],error:'Could not load the journey snapshot.'},{id:'hospital',title:'Klinikum Ingolstadt',journeys:[],error:'Could not load the journey snapshot.'}]};}finally{transitLoading=false;if(generation===store.generation)refreshTransitHTML();}
+    if(store.demo||!store.config){if(force)toast('Connect your private repository to refresh connections.');return;}
+    if(transitLoading||(!force&&Date.now()-lastTransit<60000))return;
+    const generation=store.generation,client=store.github,controller=new AbortController();
+    transitController=controller;transitLoading=true;lastTransit=Date.now();transitNeedsHelp=false;
+    transitStatus=force?'Requesting fresh connections…':'';refreshTransitHTML();
+    try{
+      if(force&&store.canWrite){
+        const request=await client.requestJourneyRefresh();
+        if(generation!==store.generation||controller.signal.aborted)return;
+        transitStatus='Waiting for GitHub to update the timetable…';refreshTransitHTML();
+        const data=await waitForJourneySnapshot(client,request,{signal:controller.signal});
+        if(generation!==store.generation||controller.signal.aborted)return;
+        transit=data;
+        const routes=snapshotForDisplay(data).routes,failed=routes.filter(r=>r.error);
+        transitStatus=failed.length===routes.length?'The timetable provider is unavailable. Please try again.':failed.length?'Connections updated; one route is unavailable.':'Connections updated.';
+      }else{
+        const data=await latestSnapshot(client,{signal:controller.signal});
+        if(generation!==store.generation||controller.signal.aborted)return;
+        transit=data;if(force)transitStatus='Latest saved timetable loaded. An editing connection is needed to request a new one.';
+      }
+    }catch(e){
+      if(generation!==store.generation||controller.signal.aborted)return;
+      transitStatus=e.message;transitNeedsHelp=force&&store.canWrite;
+    }finally{
+      if(transitController===controller){transitController=null;transitLoading=false;refreshTransitHTML();}
+    }
   }
   function dashboard(){return `${personPanels()}<section id="transit-board">${transitHTML()}</section>`;}
 
@@ -88,7 +111,7 @@ export function createHousehold(ctx){
   async function hydrate(){
     imageObserver?.disconnect();imageObserver=new IntersectionObserver(entries=>{for(const entry of entries){if(!entry.isIntersecting)continue;imageObserver.unobserve(entry.target);const id=entry.target.dataset.fileImage,file=store.records.flatMap(r=>r.data.files||[]).find(f=>f.id===id);if(!file)continue;files.url(file).then(url=>{if(entry.target.isConnected)entry.target.src=url;}).catch(()=>{entry.target.alt='Photo unavailable offline. Open the record to retry.';});}},{rootMargin:'150px'});
     document.querySelectorAll('[data-file-image]').forEach(img=>imageObserver.observe(img));
-    if(transitGeneration!==store.generation){files.clear();transitGeneration=store.generation;transit=null;lastTransit=0;}
+    if(transitGeneration!==store.generation){files.clear();transitController?.abort();transitController=null;transitLoading=false;transitGeneration=store.generation;transit=null;lastTransit=0;transitStatus='';transitNeedsHelp=false;}
     if(ctx.page()==='home')loadTransit();
   }
   async function fullBackup(){
@@ -134,7 +157,7 @@ export function createHousehold(ctx){
     if(name==='confirm-household-delete'){const undo=store.change(edit.kind,edit.id,{},true);closeModal();toast('Entry deleted.',undo);return true;}
     if(name==='refresh-transit'){await loadTransit(true);return true;}
     if(name==='journey-details'){
-      const route=transit?.routes.find(r=>r.id===el.dataset.route),j=route?.journeys[Number(el.dataset.index)];if(!j)return true;
+      const source=transit?.routes.find(r=>r.id===el.dataset.route),j=source?.journeys[Number(el.dataset.index)],route=transit&&snapshotForDisplay(transit).routes.find(r=>r.id===el.dataset.route);if(!j)return true;
       modal(`Ingolstadt Nord → ${route.title}`,`${route.stale?'<p class="notice">Saved result: snapshot is outdated. Verify before leaving.</p>':''}<p>${clock(j.departure)}–${clock(j.arrival)} · ${j.duration} minutes · ${j.changes} changes</p><div class="journey-legs">${j.legs.map(l=>`<section><span class="tag">${esc(l.line)} · ${l.realtime?'Realtime reported at last update':'Timetable only'}</span><h3>${esc(l.origin)} → ${esc(l.destination)}</h3><p>${clock(l.departure)}–${clock(l.arrival)}${l.platform?' · Board at '+esc(l.platform):''}</p>${l.notes.map(n=>`<p class="fine">${esc(n)}</p>`).join('')}</section>`).join('')}</div><p class="fine">Hospital routes may board at Nordbahnhof West or Ost. Allow time to walk to the stated stop. Times use Europe/Berlin.</p><a class="primary" href="https://www.bayern-fahrplan.de/" target="_blank" rel="noopener noreferrer">Check in Bayern-Fahrplan ↗</a>`,true);return true;
     }
     if(name==='export-file-backup'){await fullBackup();return true;}
@@ -161,5 +184,5 @@ export function createHousehold(ctx){
     if(['corner-x','corner-y'].includes(event.target.id)&&scan){const corner=Number($('[name=corner]').value);scan.points[corner]=[Number($('#corner-x').value)/100,Number($('#corner-y').value)/100];scan.draw();}
   });
   setInterval(()=>{if(!document.hidden&&ctx.page()==='home'&&!ctx.isLogin()){refreshTransitHTML();loadTransit();}},60000);
-  return {views:{appointments:appointmentsView,damages:damageView,documents:documentsView},appointmentRow,appointmentOnDate,appointmentEditor,dashboard,action,submit,afterRender:hydrate,clear:()=>{files.clear();cleanup();pendingRestore=null;searchGeneration++;clearTimeout(searchTimer);transit=null;lastTransit=0;contentMatches=[];searchError='';}};
+  return {views:{appointments:appointmentsView,damages:damageView,documents:documentsView},appointmentRow,appointmentOnDate,appointmentEditor,dashboard,action,submit,afterRender:hydrate,clear:()=>{transitController?.abort();transitController=null;transitLoading=false;transitStatus='';transitNeedsHelp=false;files.clear();cleanup();pendingRestore=null;searchGeneration++;clearTimeout(searchTimer);transit=null;lastTransit=0;contentMatches=[];searchError='';}};
 }
