@@ -1,5 +1,10 @@
 import {berlinDateTime} from './core.js';
-export const ROUTES=[{id:'munich',title:'München Hbf',stop:'91000100'},{id:'hospital',title:'Klinikum Ingolstadt',stop:'1500390'}];
+const NORD={title:'Ingolstadt Nord',stop:'80000709'};
+const DESTINATIONS=[{id:'munich',title:'München Hbf',stop:'91000100'},{id:'hospital',title:'Klinikum Ingolstadt',stop:'1500390'}];
+export const ROUTES=[
+  ...DESTINATIONS.map(route=>({...route,group:route.id,direction:'outbound',originStop:NORD.stop,originTitle:NORD.title,destinationTitle:route.title})),
+  ...DESTINATIONS.map(route=>({...route,id:route.id+'-return',group:route.id,direction:'return',originStop:route.stop,stop:NORD.stop,originTitle:route.title,destinationTitle:NORD.title}))
+];
 export function normalizeJourneys(payload,now=Date.now()){
   if(!Array.isArray(payload.journeys))throw new Error('The journey provider returned an unexpected response.');
   const results=[];
@@ -17,7 +22,7 @@ export function normalizeJourneys(payload,now=Date.now()){
 }
 export function journeyURL(base,route,now=new Date()){
   const url=new URL('XML_TRIP_REQUEST2',base.endsWith('/')?base:base+'/'),local=berlinDateTime(now);
-  url.search=new URLSearchParams({outputFormat:'rapidJSON',coordOutputFormat:'WGS84[dd.ddddd]',language:'de',type_origin:'stop',name_origin:'80000709',type_destination:'stop',name_destination:route.stop,itdTripDateTimeDepArr:'dep',itdDate:local.slice(0,10).replace(/-/g,''),itdTime:local.slice(11).replace(':',''),useRealtime:'1',calcNumberOfTrips:'8',ptOptionsActive:'1',itOptionsActive:'1',lineRestriction:'403'}).toString();return url;
+  url.search=new URLSearchParams({outputFormat:'rapidJSON',coordOutputFormat:'WGS84[dd.ddddd]',language:'de',type_origin:'stop',name_origin:route.originStop||NORD.stop,type_destination:'stop',name_destination:route.stop,itdTripDateTimeDepArr:'dep',itdDate:local.slice(0,10).replace(/-/g,''),itdTime:local.slice(11).replace(':',''),useRealtime:'1',calcNumberOfTrips:'8',ptOptionsActive:'1',itOptionsActive:'1',lineRestriction:'403'}).toString();return url;
 }
 export function snapshotForDisplay(snapshot,now=Date.now()) {
   if(snapshot?.format!=='together-journeys'||!Array.isArray(snapshot.routes))throw new Error('Journey snapshot is not available yet.');
